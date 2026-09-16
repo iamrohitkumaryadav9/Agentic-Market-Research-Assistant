@@ -1,0 +1,36 @@
+# Market Research Agent — .gitignore
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+.pytest_cache/
+
+# Environment
+.env
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Run traces (keep one example)
+run_traces/*
+!run_traces/.gitkeep
+!run_traces/example_trace.json
+
+# Checkpoints
+checkpoints.db
+
+# Logs
+*.log
