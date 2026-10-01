@@ -174,6 +174,12 @@ def _fetch_rss_news(ticker: str, limit: int = 10) -> list[NewsArticle]:
     return articles
 
 
+def _redact_massive_api_key(message: str) -> str:
+    """Remove the query-string API key from request errors before logging."""
+    api_key = get_settings().MASSIVE_API_KEY
+    return message.replace(api_key, "[REDACTED]") if api_key else message
+
+
 # ---------------------------------------------------------------------------
 # Node function
 # ---------------------------------------------------------------------------
@@ -195,7 +201,9 @@ def fetch_news(state: ResearchState) -> dict:
         source_used = "Massive.com"
         logger.info("Massive.com returned %d articles for %s", len(articles), ticker)
     except Exception as e:
-        error_msg = f"Massive.com news fetch failed for {ticker}: {e}"
+        error_msg = _redact_massive_api_key(
+            f"Massive.com news fetch failed for {ticker}: {e}"
+        )
         logger.warning(error_msg)
         errors.append(f"[fetch_news] {error_msg}")
 
@@ -205,7 +213,9 @@ def fetch_news(state: ResearchState) -> dict:
             source_used = "RSS-GoogleNews"
             logger.info("RSS fallback returned %d articles for %s", len(articles), ticker)
         except Exception as e2:
-            error_msg2 = f"RSS fallback also failed for {ticker}: {e2}"
+            error_msg2 = _redact_massive_api_key(
+                f"RSS fallback also failed for {ticker}: {e2}"
+            )
             logger.error(error_msg2)
             errors.append(f"[fetch_news] {error_msg2}")
 

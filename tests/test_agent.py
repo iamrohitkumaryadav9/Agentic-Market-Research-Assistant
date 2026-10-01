@@ -30,7 +30,7 @@ from langgraph.types import Command
 from app.graph import build_graph
 from app.guardrails import check_guardrails
 from app.nodes.critique import CritiqueOutput
-from app.nodes.sentiment import ArticleSentimentOutput
+from app.nodes.sentiment import ArticleSentimentOutput, SentimentBatchOutput
 from app.nodes.synthesis import ThesisOutput
 from app.state import (
     CritiqueResult,
@@ -66,9 +66,12 @@ def _mock_llm_factory():
                 risks_and_caveats=["Volatility"],
                 contradictions=["None identified"],
             )
-        elif schema == ArticleSentimentOutput:
-            mock_structured.invoke.return_value = ArticleSentimentOutput(
-                sentiment="positive", confidence=0.8, rationale="Test"
+        elif schema == SentimentBatchOutput:
+            mock_structured.invoke.return_value = SentimentBatchOutput(
+                article_sentiments=[ArticleSentimentOutput(
+                    article_index=0, sentiment="positive", confidence=0.8,
+                    rationale="Test",
+                )]
             )
         return mock_structured
     mock_llm.with_structured_output.side_effect = with_structured_output_side_effect
@@ -132,6 +135,44 @@ def test_gemini_llm_provider_instantiates(monkeypatch):
     assert type(llm).__name__ == "ChatGoogleGenerativeAI"
     assert llm.model.endswith("gemini-3.8-flash")
     assert llm.with_structured_output(ThesisOutput) is not None
+
+
+def test_degradation_details_reports_failed_steps():
+    """Status details expose failures instead of hiding fallback results."""
+    from app.api import _degradation_details
+
+    degraded, reasons = _degradation_details({
+        "error_log": ["[analyze_sentiment] Gemini quota exceeded"],
+        "run_log": [{"status": "failed", "message": "Sentiment unavailable"}],
+    })
+
+    assert degraded is True
+    assert reasons == [
+        "[analyze_sentiment] Gemini quota exceeded",
+        "Sentiment unavailable",
+    ]
+
+
+def test_status_endpoint_includes_degraded_run_reasons(monkeypatch):
+    """The status endpoint exposes degraded state while awaiting review."""
+    from types import SimpleNamespace
+    from app import api
+
+    state = {
+        "run_log": [{"node": "analyze_sentiment", "status": "failed", "message": "Quota exceeded"}],
+        "error_log": ["[analyze_sentiment] Gemini quota exceeded"],
+    }
+    snapshot = SimpleNamespace(next=("human_approval_gate",), values=state)
+    monkeypatch.setattr(api, "_runs", {
+        "run-1": {"ticker": "AAPL", "status": "awaiting_approval"},
+    })
+    monkeypatch.setattr(api._graph, "get_state", lambda config: snapshot)
+
+    response = api.get_status("run-1")
+
+    assert response.status == "awaiting_approval"
+    assert response.degraded is True
+    assert "Gemini quota exceeded" in response.degradation_reasons[0]
 
 
 # ---------------------------------------------------------------------------
@@ -207,6 +248,76 @@ def test_fetch_market_data_failure():
     assert result["run_log"][0]["status"] == "failed"
 
 
+def test_sentiment_batches_articles_in_one_request():
+    """Sentiment classification uses one request and preserves article mapping."""
+    from app.nodes.sentiment import analyze_sentiment
+
+    structured_llm = MagicMock()
+    structured_llm.invoke.return_value = SentimentBatchOutput(
+        article_sentiments=[
+            ArticleSentimentOutput(
+                article_index=1, sentiment="negative", confidence=0.9,
+                rationale="Weak guidance",
+            ),
+            ArticleSentimentOutput(
+                article_index=0, sentiment="positive", confidence=0.8,
+                rationale="Strong earnings",
+            ),
+        ]
+    )
+    llm = MagicMock()
+    llm.with_structured_output.return_value = structured_llm
+    state = _base_state("AAPL")
+    state["news_articles"] = [
+        {"title": "Earnings beat", "url": "https://example.com/1"},
+        {"title": "Guidance cut", "url": "https://example.com/2"},
+    ]
+
+    with patch("app.nodes.sentiment.get_llm", return_value=llm):
+        result = analyze_sentiment(state)
+
+    structured_llm.invoke.assert_called_once()
+    assert result["sentiment_summary"]["overall_sentiment"] == "mixed"
+    assert [item["sentiment"] for item in result["sentiment_summary"]["article_sentiments"]] == [
+        "positive", "negative",
+    ]
+    assert result["run_log"][0]["status"] == "completed"
+
+
+def test_sentiment_batch_failure_is_unavailable_not_neutral():
+    """A quota error is surfaced rather than counted as neutral sentiment."""
+    from app.nodes.sentiment import analyze_sentiment
+
+    structured_llm = MagicMock()
+    structured_llm.invoke.side_effect = RuntimeError("429 quota exceeded")
+    llm = MagicMock()
+    llm.with_structured_output.return_value = structured_llm
+    state = _base_state("AAPL")
+    state["news_articles"] = [{"title": "Article"}]
+
+    with patch("app.nodes.sentiment.get_llm", return_value=llm):
+        result = analyze_sentiment(state)
+
+    assert result["sentiment_summary"]["overall_sentiment"] == "unavailable"
+    assert result["sentiment_summary"]["neutral_count"] == 0
+    assert result["run_log"][0]["status"] == "failed"
+    assert "429 quota exceeded" in result["error_log"][0]
+
+
+def test_massive_api_key_is_redacted_from_request_errors():
+    """Provider request URLs must not leak the Massive API key into run logs."""
+    from app.nodes.news import _redact_massive_api_key
+
+    settings = MagicMock(MASSIVE_API_KEY="test-massive-secret")
+    with patch("app.nodes.news.get_settings", return_value=settings):
+        message = _redact_massive_api_key(
+            "Request failed for https://example.com?apiKey=test-massive-secret"
+        )
+
+    assert "test-massive-secret" not in message
+    assert "[REDACTED]" in message
+
+
 # ---------------------------------------------------------------------------
 # Test 5: Critique retry loop
 # ---------------------------------------------------------------------------
@@ -242,8 +353,11 @@ def test_critique_retry_loop():
                     contradictions=["None"],
                 )
             else:
-                mock_structured.invoke.return_value = ArticleSentimentOutput(
-                    sentiment="positive", confidence=0.8, rationale="Test"
+                mock_structured.invoke.return_value = SentimentBatchOutput(
+                    article_sentiments=[ArticleSentimentOutput(
+                        article_index=0, sentiment="positive", confidence=0.8,
+                        rationale="Test",
+                    )]
                 )
             return mock_structured
         mock_llm.with_structured_output.side_effect = with_structured_output_side_effect

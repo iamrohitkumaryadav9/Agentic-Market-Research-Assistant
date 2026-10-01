@@ -32,7 +32,7 @@ from langgraph.types import Command
 
 from app.graph import build_graph
 from app.nodes.critique import CritiqueOutput, critique
-from app.state import ResearchState
+from app.state import NewsArticle, ResearchState
 
 
 def make_base_state(ticker: str = "TEST") -> dict:
@@ -236,9 +236,12 @@ def test_retry_loop_in_graph():
                 mock_structured.invoke.side_effect = mock_synthesis_invoke
             else:
                 # Sentiment — return a basic mock
-                from app.nodes.sentiment import ArticleSentimentOutput
-                mock_structured.invoke.return_value = ArticleSentimentOutput(
-                    sentiment="positive", confidence=0.8, rationale="Test"
+                from app.nodes.sentiment import ArticleSentimentOutput, SentimentBatchOutput
+                mock_structured.invoke.return_value = SentimentBatchOutput(
+                    article_sentiments=[ArticleSentimentOutput(
+                        article_index=0, sentiment="positive", confidence=0.8,
+                        rationale="Test",
+                    )]
                 )
             return mock_structured
         mock_llm.with_structured_output.side_effect = with_structured_output_side_effect
@@ -260,6 +263,9 @@ def test_retry_loop_in_graph():
     with patch("app.nodes.critique.get_llm", side_effect=mock_get_llm_factory), \
          patch("app.nodes.synthesis.get_llm", side_effect=mock_get_llm_factory), \
          patch("app.nodes.sentiment.get_llm", side_effect=mock_get_llm_factory), \
+         patch("app.nodes.news._fetch_massive_news", return_value=[
+             NewsArticle(title="Mock article", url="https://example.com/1"),
+         ]), \
          patch("app.nodes.market_data._fetch_yfinance_data") as mock_yf:
 
         # Mock yfinance
@@ -363,9 +369,12 @@ def test_max_retries_exhaustion():
             elif schema == ThesisOutput:
                 mock_structured.invoke.side_effect = mock_synthesis
             else:
-                from app.nodes.sentiment import ArticleSentimentOutput
-                mock_structured.invoke.return_value = ArticleSentimentOutput(
-                    sentiment="neutral", confidence=0.5, rationale="Test"
+                from app.nodes.sentiment import ArticleSentimentOutput, SentimentBatchOutput
+                mock_structured.invoke.return_value = SentimentBatchOutput(
+                    article_sentiments=[ArticleSentimentOutput(
+                        article_index=0, sentiment="neutral", confidence=0.5,
+                        rationale="Test",
+                    )]
                 )
             return mock_structured
         mock_llm.with_structured_output.side_effect = with_structured_output_side_effect
@@ -385,6 +394,9 @@ def test_max_retries_exhaustion():
     with patch("app.nodes.critique.get_llm", side_effect=mock_get_llm_factory), \
          patch("app.nodes.synthesis.get_llm", side_effect=mock_get_llm_factory), \
          patch("app.nodes.sentiment.get_llm", side_effect=mock_get_llm_factory), \
+         patch("app.nodes.news._fetch_massive_news", return_value=[
+             NewsArticle(title="Mock article", url="https://example.com/1"),
+         ]), \
          patch("app.nodes.market_data._fetch_yfinance_data") as mock_yf:
 
         import pandas as pd

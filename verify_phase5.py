@@ -35,6 +35,7 @@ from langgraph.types import Command
 from app.graph import build_graph
 from app.nodes.critique import CritiqueOutput
 from app.nodes.synthesis import ThesisOutput
+from app.state import NewsArticle
 
 
 def mock_llm_factory():
@@ -58,9 +59,12 @@ def mock_llm_factory():
                 contradictions=["Minor divergence"],
             )
         else:
-            from app.nodes.sentiment import ArticleSentimentOutput
-            mock_structured.invoke.return_value = ArticleSentimentOutput(
-                sentiment="positive", confidence=0.8, rationale="Test"
+            from app.nodes.sentiment import ArticleSentimentOutput, SentimentBatchOutput
+            mock_structured.invoke.return_value = SentimentBatchOutput(
+                article_sentiments=[ArticleSentimentOutput(
+                    article_index=0, sentiment="positive", confidence=0.8,
+                    rationale="Test",
+                )]
             )
         return mock_structured
     mock_llm.with_structured_output.side_effect = with_structured_output_side_effect
@@ -95,6 +99,9 @@ def run_to_interrupt(graph, ticker, config):
     with patch("app.nodes.critique.get_llm", side_effect=mock_llm_factory), \
          patch("app.nodes.synthesis.get_llm", side_effect=mock_llm_factory), \
          patch("app.nodes.sentiment.get_llm", side_effect=mock_llm_factory), \
+         patch("app.nodes.news._fetch_massive_news", return_value=[
+             NewsArticle(title="Mock article", url="https://example.com/1"),
+         ]), \
          patch("app.nodes.market_data._fetch_yfinance_data", return_value=make_mock_yf()):
         return graph.invoke(initial_state, config)
 

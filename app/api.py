@@ -88,6 +88,8 @@ class StatusResponse(BaseModel):
     run_id: str
     ticker: str
     status: str
+    degraded: bool = False
+    degradation_reasons: list[str] = Field(default_factory=list)
     current_node: Optional[str] = None
     draft_thesis: Optional[dict] = None
     critique_count: int = 0
@@ -138,6 +140,16 @@ def _run_graph(run_id: str, ticker: str):
         logger.error("Run %s failed: %s", run_id, e)
         _runs[run_id]["status"] = "failed"
         _runs[run_id]["error"] = str(e)
+
+def _degradation_details(state: dict) -> tuple[bool, list[str]]:
+    """Summarize failed steps and error-log entries for API/UI consumers."""
+    reasons = [str(error) for error in state.get("error_log", []) if error]
+    for entry in state.get("run_log", []):
+        if entry.get("status") in {"failed", "degraded"} and entry.get("message"):
+            reasons.append(str(entry["message"]))
+
+    unique_reasons = list(dict.fromkeys(reasons))
+    return bool(unique_reasons), [reason[:500] for reason in unique_reasons[:5]]
 
 
 # ---------------------------------------------------------------------------
@@ -199,10 +211,14 @@ def get_status(run_id: str):
         elif not snapshot.next and state.get("human_decision") == "reject":
             status = "rejected"
 
+        degraded, degradation_reasons = _degradation_details(state)
+
         return StatusResponse(
             run_id=run_id,
             ticker=run_info["ticker"],
             status=status,
+            degraded=degraded,
+            degradation_reasons=degradation_reasons,
             current_node=current_node,
             draft_thesis=state.get("draft_thesis"),
             critique_count=state.get("critique_count", 0),

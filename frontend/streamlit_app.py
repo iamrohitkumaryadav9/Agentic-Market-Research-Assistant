@@ -334,6 +334,12 @@ if st.session_state.run_id:
         # Progress visualization
         render_progress(status_data)
 
+        if status_data.get("degraded"):
+            st.warning(
+                "This run is degraded: one or more data or model steps failed. "
+                "Review the run log and errors before interpreting the thesis."
+            )
+
         # --- Awaiting approval ---
         if status == "awaiting_approval":
             st.markdown("---")

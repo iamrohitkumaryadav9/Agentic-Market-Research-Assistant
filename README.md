@@ -34,7 +34,7 @@ graph TD
 |------|---------|-------------|
 | `fetch_market_data` | Price history + SMA-20/50, RSI-14, volume trend | yfinance |
 | `fetch_news` | Ticker-scoped news articles | Massive.com (Polygon.io) → RSS fallback |
-| `analyze_sentiment` | Per-article sentiment classification | LLM (structured output) |
+| `analyze_sentiment` | Batched sentiment classification for fetched articles | LLM (structured output) |
 | `synthesize_draft` | Combines technicals + sentiment into thesis | LLM (structured output) |
 | `critique` | Adversarial review for weaknesses | LLM (different prompt) |
 | `human_approval_gate` | Pauses execution via `interrupt()` | Human decision |
@@ -174,6 +174,7 @@ That's it — `config.py` picks up the new backend automatically.
 |-----------|--------|
 | Data source reliability | yfinance can be rate-limited; Massive.com free tier has request limits |
 | LLM sentiment accuracy | Sentiment classification is LLM-based, not fine-tuned — accuracy varies |
+| LLM quota limits | Articles are classified in one batch request; if a model quota is exhausted, sentiment is marked unavailable and the run is flagged as degraded for reviewer attention |
 | No backtesting | The system produces point-in-time theses, not backtested strategies |
 | Single ticker | One ticker per run — no batch/portfolio analysis |
 | In-memory runs | API run tracking uses an in-memory dict (lost on restart) |

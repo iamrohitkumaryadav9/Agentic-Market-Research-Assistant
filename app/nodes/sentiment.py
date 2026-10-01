@@ -3,7 +3,7 @@ Node: analyze_sentiment
 
 LLM-based per-article sentiment classification using Claude (or OpenAI fallback).
 
-For each news article, the LLM produces a structured verdict:
+For each news article, the LLM produces a structured verdict in one batch call:
   - sentiment: "positive" | "negative" | "neutral"
   - confidence: 0.0–1.0
   - rationale: brief explanation of the classification
@@ -14,9 +14,8 @@ context for the LLM (but the LLM makes its own independent assessment).
 Results are aggregated into a SentimentSummary.
 
 Graceful degradation:
-  - If no news articles available → skip with neutral summary
-  - If LLM call fails for an article → mark it neutral with low confidence
-  - If all LLM calls fail → proceed with neutral summary
+    - If no news articles are available → skip with unavailable sentiment
+    - If the batch LLM call fails → report unavailable sentiment and the error
 """
 
 from __future__ import annotations
@@ -37,7 +36,11 @@ logger = logging.getLogger("market_research_agent.nodes.sentiment")
 # ---------------------------------------------------------------------------
 
 class ArticleSentimentOutput(BaseModel):
-    """LLM output schema for a single article's sentiment classification."""
+    """LLM output schema for one indexed article in a sentiment batch."""
+    article_index: int = Field(
+        ge=0,
+        description="Zero-based index of the input article being classified",
+    )
     sentiment: str = Field(
         description="The overall sentiment: 'positive', 'negative', or 'neutral'"
     )
@@ -53,6 +56,11 @@ class ArticleSentimentOutput(BaseModel):
     )
 
 
+class SentimentBatchOutput(BaseModel):
+    """Structured sentiment classifications for a batch of articles."""
+    article_sentiments: list[ArticleSentimentOutput]
+
+
 # ---------------------------------------------------------------------------
 # Sentiment classification prompt
 # ---------------------------------------------------------------------------
@@ -62,6 +70,8 @@ You are a financial news sentiment analyst. Your job is to classify the sentimen
 of a news article as it relates to a specific stock ticker.
 
 Rules:
+- Return exactly one result for every input article, preserving its article_index.
+- Do not omit, duplicate, or invent article indexes.
 - Focus on how the article's content would likely affect investor sentiment \
 toward the SPECIFIC TICKER, not the market in general.
 - "positive" = the article contains information likely to increase investor \
@@ -115,16 +125,28 @@ def _build_article_prompt(ticker: str, article: dict) -> str:
     return "\n".join(parts)
 
 
+def _build_batch_prompt(ticker: str, articles: list[dict]) -> str:
+    """Build one indexed request containing the articles to classify."""
+    parts = [
+        f"Classify the following {len(articles)} articles for ticker {ticker}.",
+        "Return one result per article, using the exact zero-based article_index.",
+    ]
+    for index, article in enumerate(articles):
+        parts.append(f"\n--- article_index: {index} ---")
+        parts.append(_build_article_prompt(ticker, article))
+    return "\n".join(parts)
+
+
 # ---------------------------------------------------------------------------
 # Node function
 # ---------------------------------------------------------------------------
 
 def analyze_sentiment(state: ResearchState) -> dict:
     """
-    Classify sentiment for each news article via LLM structured output.
+    Classify all news articles in one LLM structured-output request.
 
-    On failure for individual articles: marks them neutral with low confidence.
-    On total failure: returns a neutral summary so the graph can proceed.
+    On failure: returns unavailable sentiment and marks the node failed so the
+    API and reviewer can identify a degraded run.
     """
     start = time.time()
     ticker = state["ticker"]
@@ -152,7 +174,7 @@ def analyze_sentiment(state: ResearchState) -> dict:
     # --- Initialize LLM with structured output ---
     try:
         llm = get_llm()
-        structured_llm = llm.with_structured_output(ArticleSentimentOutput)
+        structured_llm = llm.with_structured_output(SentimentBatchOutput)
     except Exception as e:
         logger.error("Failed to initialize LLM for sentiment: %s", e)
         elapsed_ms = (time.time() - start) * 1000
@@ -173,53 +195,57 @@ def analyze_sentiment(state: ResearchState) -> dict:
             "error_log": [f"[analyze_sentiment] LLM init failed: {e}"],
         }
 
-    # --- Classify each article ---
-    article_sentiments: list[SentimentResult] = []
-    errors: list[str] = []
+    # --- Classify the batch in one request ---
+    try:
+        result: SentimentBatchOutput = structured_llm.invoke(
+            [
+                {"role": "system", "content": _SENTIMENT_SYSTEM_PROMPT},
+                {"role": "user", "content": _build_batch_prompt(ticker, articles)},
+            ]
+        )
+        results_by_index = {}
+        for item in result.article_sentiments:
+            if item.article_index >= len(articles) or item.article_index in results_by_index:
+                raise ValueError(f"Invalid or duplicate article_index: {item.article_index}")
+            if item.sentiment.lower() not in {"positive", "negative", "neutral"}:
+                raise ValueError(f"Invalid sentiment for article {item.article_index}")
+            results_by_index[item.article_index] = item
 
-    for i, article in enumerate(articles):
-        try:
-            user_prompt = _build_article_prompt(ticker, article)
-            result: ArticleSentimentOutput = structured_llm.invoke(
-                [
-                    {"role": "system", "content": _SENTIMENT_SYSTEM_PROMPT},
-                    {"role": "user", "content": user_prompt},
-                ]
-            )
+        expected_indexes = set(range(len(articles)))
+        if set(results_by_index) != expected_indexes:
+            raise ValueError("Sentiment response did not classify every article")
 
-            article_sentiments.append(
-                SentimentResult(
-                    article_title=article.get("title", f"Article {i + 1}"),
-                    article_url=article.get("url", ""),
-                    sentiment=result.sentiment.lower(),
-                    confidence=result.confidence,
-                    rationale=result.rationale,
-                )
+        article_sentiments = [
+            SentimentResult(
+                article_title=article.get("title", f"Article {index + 1}"),
+                article_url=article.get("url", ""),
+                sentiment=results_by_index[index].sentiment.lower(),
+                confidence=results_by_index[index].confidence,
+                rationale=results_by_index[index].rationale,
             )
-            logger.debug(
-                "Article %d/%d: %s (%.0f%%) — %s",
-                i + 1, len(articles), result.sentiment,
-                result.confidence * 100, result.rationale[:60],
-            )
-
-        except Exception as e:
-            logger.warning(
-                "Sentiment classification failed for article %d: %s", i + 1, e
-            )
-            errors.append(
-                f"[analyze_sentiment] Failed for article {i + 1} "
-                f"('{article.get('title', '?')[:40]}'): {e}"
-            )
-            # Graceful fallback: mark as neutral with low confidence
-            article_sentiments.append(
-                SentimentResult(
-                    article_title=article.get("title", f"Article {i + 1}"),
-                    article_url=article.get("url", ""),
-                    sentiment="neutral",
-                    confidence=0.2,
-                    rationale=f"Classification failed ({e}); defaulting to neutral",
-                )
-            )
+            for index, article in enumerate(articles)
+        ]
+    except Exception as e:
+        elapsed_ms = (time.time() - start) * 1000
+        message = f"[analyze_sentiment] Batch classification unavailable: {e}"
+        logger.warning("Sentiment batch failed for %s: %s", ticker, e)
+        unavailable_summary = SentimentSummary(
+            overall_sentiment="unavailable",
+            average_confidence=0.0,
+        )
+        return {
+            "sentiment_summary": unavailable_summary.model_dump(),
+            "run_log": [
+                LogEntry(
+                    node="analyze_sentiment",
+                    status="failed",
+                    duration_ms=elapsed_ms,
+                    message=message,
+                    details={"article_count": len(articles), "degraded": True},
+                ).model_dump()
+            ],
+            "error_log": [message],
+        }
 
     # --- Aggregate ---
     pos = sum(1 for s in article_sentiments if s.sentiment == "positive")
@@ -274,9 +300,9 @@ def analyze_sentiment(state: ResearchState) -> dict:
                     "negative": neg,
                     "neutral": neu,
                     "avg_confidence": round(avg_conf, 3),
-                    "failed_classifications": len(errors),
+                    "failed_classifications": 0,
                 },
             ).model_dump()
         ],
-        "error_log": errors,
+        "error_log": [],
     }

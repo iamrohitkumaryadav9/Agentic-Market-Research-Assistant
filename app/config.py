@@ -117,6 +117,8 @@ def get_llm(
             model=settings.GEMINI_MODEL,
             google_api_key=settings.GOOGLE_API_KEY,
             temperature=temperature,
+            retries=1,
+            request_timeout=30,
         )
 
     if provider == LLMProvider.ANTHROPIC:
