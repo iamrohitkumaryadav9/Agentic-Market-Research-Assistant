@@ -32,6 +32,7 @@ logger = logging.getLogger("market_research_agent")
 class LLMProvider(str, Enum):
     ANTHROPIC = "anthropic"
     OPENAI = "openai"
+    GEMINI = "gemini"
 
 
 class CheckpointerBackend(str, Enum):
@@ -50,9 +51,11 @@ class Settings:
     # LLM
     ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
+    GOOGLE_API_KEY: str = os.getenv("GOOGLE_API_KEY", "")
     LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", LLMProvider.ANTHROPIC.value)
     ANTHROPIC_MODEL: str = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-20250514")
     OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-4o")
+    GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
     LLM_TEMPERATURE: float = float(os.getenv("LLM_TEMPERATURE", "0.2"))
 
     # Data sources
@@ -106,6 +109,16 @@ def get_llm(
     provider = provider or settings.LLM_PROVIDER
     temperature = temperature if temperature is not None else settings.LLM_TEMPERATURE
 
+    if provider == LLMProvider.GEMINI:
+        if not settings.GOOGLE_API_KEY:
+            raise ValueError("No GOOGLE_API_KEY configured for Gemini.")
+        from langchain_google_genai import ChatGoogleGenerativeAI
+        return ChatGoogleGenerativeAI(
+            model=settings.GEMINI_MODEL,
+            google_api_key=settings.GOOGLE_API_KEY,
+            temperature=temperature,
+        )
+
     if provider == LLMProvider.ANTHROPIC:
         if not settings.ANTHROPIC_API_KEY:
             logger.warning("No ANTHROPIC_API_KEY found, falling back to OpenAI")
@@ -122,7 +135,7 @@ def get_llm(
     if provider == LLMProvider.OPENAI:
         if not settings.OPENAI_API_KEY:
             raise ValueError(
-                "No LLM API key configured. Set ANTHROPIC_API_KEY or OPENAI_API_KEY."
+                "No OPENAI_API_KEY configured for OpenAI."
             )
         from langchain_openai import ChatOpenAI
         return ChatOpenAI(

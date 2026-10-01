@@ -118,6 +118,22 @@ def test_graph_compiles():
     assert graph is not None
 
 
+def test_gemini_llm_provider_instantiates(monkeypatch):
+    """The Gemini provider builds a LangChain chat model from settings."""
+    from app import config
+
+    settings = config.Settings()
+    settings.GOOGLE_API_KEY = "test-google-api-key"
+    settings.GEMINI_MODEL = "gemini-3.8-flash"
+    monkeypatch.setattr(config, "get_settings", lambda: settings)
+
+    llm = config.get_llm(provider="gemini")
+
+    assert type(llm).__name__ == "ChatGoogleGenerativeAI"
+    assert llm.model.endswith("gemini-3.8-flash")
+    assert llm.with_structured_output(ThesisOutput) is not None
+
+
 # ---------------------------------------------------------------------------
 # Test 2: State schema validation
 # ---------------------------------------------------------------------------

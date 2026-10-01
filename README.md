@@ -61,7 +61,7 @@ graph TD
 
 ### Prerequisites
 - Python 3.11+
-- API keys: at least one of Anthropic or OpenAI (for LLM nodes)
+- API keys: at least one of Anthropic, OpenAI, or Google Gemini (for LLM nodes)
 - Massive.com API key (optional — falls back to RSS)
 
 ### Local Setup
@@ -76,9 +76,12 @@ cp .env.example .env
 # Edit .env with your API keys:
 #   ANTHROPIC_API_KEY=sk-ant-...   (or)
 #   OPENAI_API_KEY=sk-proj-...
-#   LLM_PROVIDER=anthropic         (or openai)
+#   GOOGLE_API_KEY=...             (or)
+#   LLM_PROVIDER=anthropic         (or openai or gemini)
 #   MASSIVE_API_KEY=your-key       (optional)
 #   LANGSMITH_API_KEY=lsv2_...     (optional)
+
+# For Gemini, set GOOGLE_API_KEY and optionally GEMINI_MODEL (default: gemini-3.8-flash).
 
 # Run tests
 pytest tests/ -v
