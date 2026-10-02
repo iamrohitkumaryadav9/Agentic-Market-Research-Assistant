@@ -26,6 +26,7 @@ import pandas as pd
 from tenacity import (
     retry,
     retry_if_exception_type,
+    retry_if_not_exception_type,
     stop_after_attempt,
     wait_exponential,
 )
@@ -109,7 +110,8 @@ def compute_price_change_pct(closes: pd.Series, days: int) -> float:
 @retry(
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=1, min=2, max=10),
-    retry=retry_if_exception_type((Exception,)),
+    # Don't back off on "no data for this ticker" — it won't fix itself.
+    retry=retry_if_exception_type(Exception) & retry_if_not_exception_type(ValueError),
     reraise=True,
 )
 def _fetch_yfinance_data(ticker: str, period: str = "3mo") -> pd.DataFrame:

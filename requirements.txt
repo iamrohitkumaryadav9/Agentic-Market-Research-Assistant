@@ -32,3 +32,11 @@ python-dotenv>=1.0
 pytest>=8.0
 pytest-asyncio>=0.23
 httpx>=0.27
+
+# Local LLM via Ollama (LLM_PROVIDER=ollama)
+langchain-ollama>=0.3.0,<1.0
+
+# Persistent checkpointers (CHECKPOINTER_BACKEND=sqlite|postgres)
+langgraph-checkpoint-sqlite>=2.0
+# langgraph-checkpoint-postgres
+# psycopg[binary]

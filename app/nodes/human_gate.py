@@ -22,6 +22,33 @@ from langgraph.types import interrupt
 from app.state import LogEntry, ResearchState
 
 
+VALID_DECISIONS = ("approve", "reject")
+
+
+def _normalize(value) -> str | None:
+    """Return 'approve'/'reject' (case/whitespace-insensitive) or None if invalid."""
+    if isinstance(value, str):
+        value = value.strip().lower()
+        if value in VALID_DECISIONS:
+            return value
+    return None
+
+
+def _review_warnings(critique_notes: dict) -> list[str]:
+    warnings = []
+    if critique_notes.get("auto_approved"):
+        warnings.append(
+            "The automated critique did not perform a genuine review "
+            "(LLM failure or placeholder draft). Review this thesis carefully."
+        )
+    elif critique_notes and not critique_notes.get("approved", True):
+        warnings.append(
+            "The critique still rejected this draft after the maximum number "
+            "of revisions; unresolved issues are listed in critique_notes."
+        )
+    return warnings
+
+
 def human_approval_gate(state: ResearchState) -> dict:
     """
     Pauses execution via interrupt() and waits for a human decision.
@@ -36,7 +63,8 @@ def human_approval_gate(state: ResearchState) -> dict:
     """
     start = time.time()
     ticker = state["ticker"]
-    draft = state.get("draft_thesis", {})
+    draft = state.get("draft_thesis") or {}
+    critique_notes = state.get("critique_notes") or {}
 
     # Emit a pre-interrupt log entry
     pre_log = LogEntry(
@@ -50,17 +78,27 @@ def human_approval_gate(state: ResearchState) -> dict:
         ),
     ).model_dump()
 
+    payload = {
+        "message": "Please review the draft thesis and submit your decision.",
+        "ticker": ticker,
+        "draft_thesis": draft,
+        "critique_notes": critique_notes,
+        # Make it impossible to miss that the critique wasn't a real review
+        # or that the draft was approved with unresolved issues.
+        "warnings": _review_warnings(critique_notes),
+        "options": list(VALID_DECISIONS),
+    }
+
     # ⏸ THIS IS THE REAL PAUSE POINT ⏸
     # interrupt() halts the graph and persists state via the checkpointer.
     # It returns whatever value the human provides via Command(resume=...).
-    human_decision = interrupt(
-        {
-            "message": "Please review the draft thesis and submit your decision.",
-            "ticker": ticker,
-            "draft_thesis": draft,
-            "options": ["approve", "reject"],
-        }
-    )
+    # An unrecognised value (typo, wrong case) re-prompts instead of silently
+    # being treated as a rejection.
+    human_decision = _normalize(interrupt(payload))
+    while human_decision is None:
+        human_decision = _normalize(
+            interrupt({**payload, "error": "Invalid decision. Reply 'approve' or 'reject'."})
+        )
 
     elapsed_ms = (time.time() - start) * 1000
 

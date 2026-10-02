@@ -3,7 +3,7 @@ Configuration module for the Market Research Agent.
 
 Handles:
 - Environment variable loading (.env)
-- LLM provider factory (Anthropic primary, OpenAI fallback)
+- LLM provider factory (Anthropic primary, OpenAI fallback, Gemini, local Ollama)
 - Checkpointer factory (MemorySaver for dev, swap to SqliteSaver/PostgresSaver)
 - API key validation
 - Logging configuration
@@ -33,6 +33,7 @@ class LLMProvider(str, Enum):
     ANTHROPIC = "anthropic"
     OPENAI = "openai"
     GEMINI = "gemini"
+    OLLAMA = "ollama"
 
 
 class CheckpointerBackend(str, Enum):
@@ -57,6 +58,13 @@ class Settings:
     OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-4o")
     GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
     LLM_TEMPERATURE: float = float(os.getenv("LLM_TEMPERATURE", "0.2"))
+
+    # Local Ollama (no hosted API key needed)
+    OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+    OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "qwen3:4b")
+    # Small CPU-bound models: keep the sentiment batch tiny and outputs capped
+    OLLAMA_MAX_SENTIMENT_ARTICLES: int = int(os.getenv("OLLAMA_MAX_SENTIMENT_ARTICLES", "1"))
+    OLLAMA_NUM_PREDICT: int = int(os.getenv("OLLAMA_NUM_PREDICT", "1024"))
 
     # Data sources
     MASSIVE_API_KEY: str = os.getenv("MASSIVE_API_KEY", "")
@@ -108,6 +116,36 @@ def get_llm(
     settings = get_settings()
     provider = provider or settings.LLM_PROVIDER
     temperature = temperature if temperature is not None else settings.LLM_TEMPERATURE
+
+    if provider == LLMProvider.OLLAMA:
+        import httpx
+        from langchain_ollama import ChatOllama
+        return ChatOllama(
+            model=settings.OLLAMA_MODEL,
+            base_url=settings.OLLAMA_BASE_URL,
+            temperature=temperature,
+            reasoning=False,  # qwen3 "thinking" mode is slow and breaks JSON output
+            num_ctx=8192,
+            num_predict=settings.OLLAMA_NUM_PREDICT,
+            # Read timeout applies per streamed chunk: a stalled stream fails
+            # (and the node degrades gracefully) instead of hanging forever.
+            client_kwargs={"timeout": httpx.Timeout(connect=10, read=180, write=30, pool=10)},
+        )
+
+    if provider == LLMProvider.OLLAMA:
+        import httpx
+        from langchain_ollama import ChatOllama
+        return ChatOllama(
+            model=settings.OLLAMA_MODEL,
+            base_url=settings.OLLAMA_BASE_URL,
+            temperature=temperature,
+            reasoning=False,  # qwen3 "thinking" mode is slow and breaks JSON output
+            num_ctx=8192,
+            num_predict=settings.OLLAMA_NUM_PREDICT,
+            # Read timeout applies per streamed chunk: a stalled stream fails
+            # (and the node degrades gracefully) instead of hanging forever.
+            client_kwargs={"timeout": httpx.Timeout(connect=10, read=180, write=30, pool=10)},
+        )
 
     if provider == LLMProvider.GEMINI:
         if not settings.GOOGLE_API_KEY:
@@ -176,8 +214,11 @@ def get_checkpointer(backend: str | None = None):
 
     if backend == CheckpointerBackend.SQLITE:
         try:
+            import sqlite3
             from langgraph.checkpoint.sqlite import SqliteSaver
-            return SqliteSaver(settings.SQLITE_DB_PATH)
+            # SqliteSaver needs a live connection, not a path string
+            conn = sqlite3.connect(settings.SQLITE_DB_PATH, check_same_thread=False)
+            return SqliteSaver(conn)
         except ImportError:
             logger.warning(
                 "langgraph-checkpoint-sqlite not installed; falling back to MemorySaver"
@@ -188,10 +229,18 @@ def get_checkpointer(backend: str | None = None):
     if backend == CheckpointerBackend.POSTGRES:
         try:
             from langgraph.checkpoint.postgres import PostgresSaver
-            return PostgresSaver(settings.POSTGRES_CONN_STRING)
+            from psycopg import Connection
+            from psycopg.rows import dict_row
+            conn = Connection.connect(
+                settings.POSTGRES_CONN_STRING,
+                autocommit=True, prepare_threshold=0, row_factory=dict_row,
+            )
+            saver = PostgresSaver(conn)
+            saver.setup()
+            return saver
         except ImportError:
             logger.warning(
-                "langgraph-checkpoint-postgres not installed; falling back to MemorySaver"
+                "langgraph-checkpoint-postgres/psycopg not installed; falling back to MemorySaver"
             )
             from langgraph.checkpoint.memory import MemorySaver
             return MemorySaver()

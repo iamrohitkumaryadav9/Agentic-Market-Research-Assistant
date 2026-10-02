@@ -28,13 +28,26 @@ def finalize(state: ResearchState) -> dict:
     """
     start = time.time()
     ticker = state["ticker"]
-    draft = state.get("draft_thesis", {})
+    draft = state.get("draft_thesis") or {}
     critique_notes = state.get("critique_notes")
 
-    # Build critique history from the run log
-    critique_history = []
-    if critique_notes:
+    # Full history of every critique pass (fall back to the last verdict only
+    # if the history channel was never populated).
+    critique_history = list(state.get("critique_history") or [])
+    if not critique_history and critique_notes:
         critique_history.append(critique_notes)
+
+    risks = list(draft.get("risks_and_caveats", []))
+    if critique_notes and critique_notes.get("auto_approved"):
+        risks.append(
+            "Automated critique did NOT complete a genuine review of this "
+            "thesis (LLM failure or placeholder draft); quality is unchecked."
+        )
+    elif critique_notes and not critique_notes.get("approved"):
+        risks.append(
+            "Critique still had unresolved issues after the maximum number "
+            "of revisions: " + "; ".join(critique_notes.get("issues", []))
+        )
 
     # Determine which data sources were used vs failed
     data_sources_used = []
@@ -45,10 +58,13 @@ def finalize(state: ResearchState) -> dict:
     else:
         data_sources_failed.append("yfinance (price/technicals)")
 
-    if state.get("news_articles"):
-        data_sources_used.append("Massive.com (news)")
+    news = state.get("news_articles") or []
+    if news:
+        # Report the provider(s) the articles actually came from.
+        for provider in sorted({a.get("provider", "unknown") for a in news}):
+            data_sources_used.append(f"{provider} (news)")
     else:
-        data_sources_failed.append("Massive.com (news)")
+        data_sources_failed.append("news (Massive.com and RSS fallback)")
 
     final = FinalThesis(
         ticker=ticker,
@@ -58,7 +74,7 @@ def finalize(state: ResearchState) -> dict:
         technical_evidence=draft.get("technical_evidence", []),
         sentiment_evidence=draft.get("sentiment_evidence", []),
         cited_sources=draft.get("cited_sources", []),
-        risks_and_caveats=draft.get("risks_and_caveats", []),
+        risks_and_caveats=risks,
         contradictions=draft.get("contradictions", []),
         critique_history=critique_history,
         human_approved=True,

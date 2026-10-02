@@ -86,7 +86,9 @@ def route_human_decision(state: ResearchState) -> str:
     """
     After the human_approval_gate resumes, route based on the decision.
     """
-    decision = state.get("human_decision", "reject")
+    # The gate only returns a validated "approve"/"reject"; anything else
+    # (should be impossible) is treated as a reject, never as an approval.
+    decision = state.get("human_decision")
 
     if decision == "approve":
         logger.info("Human APPROVED thesis — routing to finalize")
@@ -202,8 +204,8 @@ def save_run_trace(state: ResearchState, thread_id: str) -> str:
     filename = f"trace_{state.get('ticker', 'UNKNOWN')}_{thread_id}.json"
     filepath = os.path.join(traces_dir, filename)
 
-    with open(filepath, "w") as f:
-        json.dump(trace_data, f, indent=2, default=str)
+    with open(filepath, "w", encoding="utf-8") as f:
+        json.dump(trace_data, f, indent=2, default=str, ensure_ascii=False)
 
     logger.info("Run trace saved to %s", filepath)
     return filepath

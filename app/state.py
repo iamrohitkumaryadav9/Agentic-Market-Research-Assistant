@@ -72,6 +72,7 @@ class NewsArticle(BaseModel):
     source: str = "unknown"
     published_utc: str = ""
     url: str = ""
+    provider: str = "unknown"             # "massive.com" | "rss" — where we fetched it from
     tickers: list[str] = Field(default_factory=list)
     # Massive-specific: sentiment/insight tags returned by their API
     insights: Optional[list[dict]] = None
@@ -116,6 +117,9 @@ class DraftThesis(BaseModel):
 class CritiqueResult(BaseModel):
     """Output of the adversarial critique node."""
     approved: bool = False
+    # True when approval is NOT a real review (LLM failure / placeholder draft).
+    # Surfaced to the human reviewer and into the final thesis caveats.
+    auto_approved: bool = False
     issues: list[str] = Field(default_factory=list)
     unsupported_claims: list[str] = Field(default_factory=list)
     suggested_revisions: list[str] = Field(default_factory=list)
@@ -169,7 +173,8 @@ class ResearchState(TypedDict):
     Typed state schema for the LangGraph StateGraph.
 
     Fields without Annotated use "last writer wins" (overwrite) semantics.
-    run_log and error_log use operator.add so every node appends entries.
+    run_log, error_log and critique_history use operator.add so every node
+    appends entries.
     """
     # Input
     ticker: str
@@ -184,6 +189,7 @@ class ResearchState(TypedDict):
     draft_thesis: Optional[dict]
     critique_notes: Optional[dict]
     critique_count: int
+    critique_history: Annotated[list, operator.add]   # every critique pass, append-only
 
     # Human-in-the-loop
     human_decision: Optional[str]         # "approve" | "reject"

@@ -1,0 +1,8 @@
+.venv/
+.git/
+__pycache__/
+*.pyc
+.pytest_cache/
+.env
+checkpoints.db
+run_traces/*.json

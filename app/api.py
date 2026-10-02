@@ -25,7 +25,7 @@ from pydantic import BaseModel, Field
 
 from app.config import configure_logging, get_checkpointer
 from app.graph import build_graph, save_run_trace
-from app.guardrails import check_guardrails
+from app.guardrails import validate_ticker
 
 configure_logging()
 logger = logging.getLogger("market_research_agent.api")
@@ -161,8 +161,8 @@ def start_run(req: RunRequest):
     """Start a new research run for a ticker."""
     ticker = req.ticker.upper().strip()
 
-    # Guardrail check
-    is_safe, refusal = check_guardrails(ticker)
+    # Guardrail check (also rejects anything that doesn't look like a ticker)
+    is_safe, refusal = validate_ticker(ticker)
     if not is_safe:
         raise HTTPException(status_code=400, detail=refusal)
 
@@ -254,6 +254,16 @@ def submit_approval(run_id: str, req: ApproveRequest):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to check run state: {e}")
+
+    # A placeholder draft (synthesis failed) is not a research thesis: never approvable.
+    if req.decision == "approve" and any(
+        e.get("node") == "synthesize_draft" and e.get("status") == "failed"
+        for e in (snapshot.values or {}).get("run_log", [])
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Synthesis failed; the draft is a placeholder and cannot be approved.",
+        )
 
     # Resume the graph with the human decision
     try:

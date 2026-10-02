@@ -12,6 +12,7 @@ Connects to the FastAPI backend via HTTP.
 
 from __future__ import annotations
 
+import os
 import time
 
 import requests
@@ -21,7 +22,7 @@ import streamlit as st
 # Config
 # ---------------------------------------------------------------------------
 
-API_BASE = "http://localhost:8000"
+API_BASE = os.getenv("API_BASE", "http://localhost:8000")
 
 st.set_page_config(
     page_title="Market Research Agent",
@@ -57,6 +58,14 @@ st.markdown("""
     .node-failed {
         background-color: #f8d7da;
         border-left: 4px solid #dc3545;
+    }
+    .node-degraded {
+        background-color: #fff3cd;
+        border-left: 4px solid #fd7e14;
+    }
+    .node-skipped {
+        background-color: #e2e3e5;
+        border-left: 4px solid #6c757d;
     }
     .node-waiting {
         background-color: #cce5ff;
@@ -182,12 +191,18 @@ def render_progress(status_data: dict):
 
     completed_nodes = set()
     failed_nodes = set()
+    degraded_nodes = set()
+    skipped_nodes = set()
     for entry in run_log:
         node = entry.get("node", "")
         if entry.get("status") == "completed":
             completed_nodes.add(node)
         elif entry.get("status") == "failed":
             failed_nodes.add(node)
+        elif entry.get("status") == "degraded":
+            degraded_nodes.add(node)
+        elif entry.get("status") == "skipped":
+            skipped_nodes.add(node)
 
     st.markdown("### Graph Progress")
 
@@ -200,6 +215,12 @@ def render_progress(status_data: dict):
         elif node_id in failed_nodes:
             css_class = "node-failed"
             icon = "❌"
+        elif node_id in degraded_nodes:
+            css_class = "node-degraded"
+            icon = "⚠️"
+        elif node_id in skipped_nodes:
+            css_class = "node-skipped"
+            icon = "⏭️"
         elif node_id == current_node:
             css_class = "node-waiting" if "awaiting" in status else "node-running"
             icon = "⏸️" if "awaiting" in status else "🔄"
@@ -336,14 +357,30 @@ if st.session_state.run_id:
 
         if status_data.get("degraded"):
             st.warning(
-                "This run is degraded: one or more data or model steps failed. "
-                "Review the run log and errors before interpreting the thesis."
+                "This run has incomplete or fallback analysis. Review the "
+                "degradation details before interpreting the thesis."
             )
+            reasons = status_data.get("degradation_reasons", [])
+            if reasons:
+                with st.expander("Degradation details"):
+                    for reason in reasons:
+                        st.write(reason)
 
         # --- Awaiting approval ---
         if status == "awaiting_approval":
             st.markdown("---")
             st.markdown("## 👤 Human Review Required")
+
+            synthesis_failed = any(
+                entry.get("node") == "synthesize_draft"
+                and entry.get("status") == "failed"
+                for entry in status_data.get("run_log", [])
+            )
+            if synthesis_failed:
+                st.error(
+                    "Synthesis failed; this is a fallback placeholder, not a "
+                    "valid research thesis. Approval is disabled."
+                )
 
             draft = status_data.get("draft_thesis", {})
             if draft:
@@ -356,7 +393,10 @@ if st.session_state.run_id:
 
             col_approve, col_reject = st.columns(2)
             with col_approve:
-                if st.button("✅ Approve Thesis", type="primary", use_container_width=True):
+                if st.button(
+                    "✅ Approve Thesis", type="primary", use_container_width=True,
+                    disabled=synthesis_failed,
+                ):
                     result = submit_decision(run_id, "approve")
                     if result:
                         st.success("Thesis approved and finalized!")

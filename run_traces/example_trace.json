@@ -1,0 +1,98 @@
+{
+  "thread_id": "359a131c-55d9-44e9-a184-b148778d156f",
+  "ticker": "AAPL",
+  "timestamp": "2026-10-02T05:53:41.794453+00:00",
+  "run_log": [
+    {
+      "node": "fetch_market_data",
+      "status": "completed",
+      "timestamp": "2026-10-02T05:46:38.019575+00:00",
+      "duration_ms": 2263.579845428467,
+      "message": "Fetched 64 bars for AAPL. Close: $330.32, RSI: 51.33, Volume trend: stable",
+      "details": {
+        "bars_count": 64,
+        "latest_close": 330.32,
+        "sma_20": 331.62,
+        "sma_50": 322.11,
+        "rsi_14": 51.33
+      }
+    },
+    {
+      "node": "fetch_news",
+      "status": "completed",
+      "timestamp": "2026-10-02T05:46:38.970908+00:00",
+      "duration_ms": 950.3834247589111,
+      "message": "Fetched 5 article(s) for AAPL from rss",
+      "details": {
+        "source": "rss",
+        "count": 5,
+        "has_insights": false
+      }
+    },
+    {
+      "node": "analyze_sentiment",
+      "status": "completed",
+      "timestamp": "2026-10-02T05:47:41.397485+00:00",
+      "duration_ms": 62425.26078224182,
+      "message": "Classified 5 article(s) for AAPL: positive (+2/-1/=2)",
+      "details": null
+    },
+    {
+      "node": "synthesize_draft",
+      "status": "completed",
+      "timestamp": "2026-10-02T05:50:07.020726+00:00",
+      "duration_ms": 145622.2996711731,
+      "message": "Draft 0 for AAPL: neutral @ 72",
+      "details": null
+    },
+    {
+      "node": "critique",
+      "status": "completed",
+      "timestamp": "2026-10-02T05:53:41.667120+00:00",
+      "duration_ms": 214640.78521728516,
+      "message": "Critique pass 1 for AAPL: NEEDS REVISION. 5 issue(s) found. Confidence adjustment: +0",
+      "details": {
+        "approved": false,
+        "issues_count": 5,
+        "unsupported_claims_count": 1,
+        "confidence_adjustment": 0.0
+      }
+    },
+    {
+      "node": "human_approval_gate",
+      "status": "waiting_for_human",
+      "timestamp": "2026-10-02T05:53:41.789704+00:00",
+      "duration_ms": null,
+      "message": "Thesis for AAPL ready for review. Direction: neutral, Confidence: 72.0. Graph execution paused — awaiting human decision.",
+      "details": null
+    },
+    {
+      "node": "human_approval_gate",
+      "status": "completed",
+      "timestamp": "2026-10-02T05:53:41.789781+00:00",
+      "duration_ms": 0.09489059448242188,
+      "message": "Human decision received: approve",
+      "details": null
+    },
+    {
+      "node": "finalize",
+      "status": "completed",
+      "timestamp": "2026-10-02T05:53:41.791670+00:00",
+      "duration_ms": 0.07152557373046875,
+      "message": "Finalized thesis for AAPL (human approved)",
+      "details": null
+    }
+  ],
+  "error_log": [
+    "[fetch_news] MASSIVE_API_KEY not set — using RSS fallback"
+  ],
+  "final_state": {
+    "has_price_data": true,
+    "has_news": true,
+    "has_sentiment": true,
+    "has_draft": true,
+    "critique_count": 1,
+    "human_decision": "approve",
+    "has_final_thesis": true
+  }
+}

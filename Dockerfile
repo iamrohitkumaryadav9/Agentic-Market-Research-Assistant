@@ -1,4 +1,4 @@
-FROM python:3.14-slim
+FROM python:3.12-slim
 
 WORKDIR /app
 
@@ -17,8 +17,12 @@ COPY . .
 # Create run_traces directory
 RUN mkdir -p run_traces
 
-# Expose ports: FastAPI (8000) + Streamlit (8501)
+# FastAPI (8000) + Streamlit (8501)
 EXPOSE 8000 8501
 
-# Start both services
-CMD ["sh", "-c", "uvicorn app.api:app --host 0.0.0.0 --port 8000 & streamlit run frontend/streamlit_app.py --server.port 8501 --server.address 0.0.0.0 --server.headless true"]
+ENV API_BASE=http://localhost:8000
+
+# Run both services; if either exits the container stops (so a crash is visible).
+CMD ["sh", "-c", "uvicorn app.api:app --host 0.0.0.0 --port 8000 & \
+streamlit run frontend/streamlit_app.py --server.port 8501 --server.address 0.0.0.0 --server.headless true & \
+wait -n; exit $?"]

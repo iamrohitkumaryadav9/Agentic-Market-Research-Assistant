@@ -25,7 +25,8 @@ import time
 
 from pydantic import BaseModel, Field
 
-from app.config import get_llm
+from app.config import get_llm, get_settings
+from app.guardrails import is_untrusted_text_safe
 from app.state import LogEntry, ResearchState, SentimentResult, SentimentSummary
 
 logger = logging.getLogger("market_research_agent.nodes.sentiment")
@@ -150,7 +151,25 @@ def analyze_sentiment(state: ResearchState) -> dict:
     """
     start = time.time()
     ticker = state["ticker"]
-    articles = state.get("news_articles") or []
+    all_articles = state.get("news_articles") or []
+
+    # News text is untrusted external input: drop articles containing
+    # prompt-injection phrasing before they can reach the LLM.
+    articles = [
+        a for a in all_articles
+        if is_untrusted_text_safe(a.get("title", ""))
+        and is_untrusted_text_safe(a.get("description") or "")
+    ]
+    dropped = len(all_articles) - len(articles)
+    drop_errors = (
+        [f"[analyze_sentiment] dropped {dropped} article(s) with prompt-injection phrasing"]
+        if dropped else []
+    )
+
+    # Small local models: cap the batch so CPU inference stays practical.
+    settings = get_settings()
+    if settings.LLM_PROVIDER == "ollama":
+        articles = articles[: max(settings.OLLAMA_MAX_SENTIMENT_ARTICLES, 1)]
 
     # --- Handle no articles ---
     if not articles:
@@ -166,9 +185,10 @@ def analyze_sentiment(state: ResearchState) -> dict:
                     node="analyze_sentiment",
                     status="skipped",
                     duration_ms=elapsed_ms,
-                    message="No news articles to analyze — sentiment unavailable",
+                    message="No usable news articles to analyze — sentiment unavailable",
                 ).model_dump()
             ],
+            "error_log": drop_errors,
         }
 
     # --- Initialize LLM with structured output ---
@@ -304,5 +324,5 @@ def analyze_sentiment(state: ResearchState) -> dict:
                 },
             ).model_dump()
         ],
-        "error_log": [],
+        "error_log": drop_errors,
     }

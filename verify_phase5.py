@@ -9,7 +9,7 @@ it's robust across the edge cases that matter for production:
   3. State inspection — can read the draft thesis while paused
   4. Approve path — resume with "approve" routes to finalize
   5. Reject path — resume with "reject" routes to discard
-  6. Arbitrary resume values — unexpected values handled gracefully
+  6. Arbitrary resume values — invalid values re-prompt; valid ones are normalized
   7. Re-invocation after completion — graph doesn't re-run
 
 Run: python verify_phase5.py
@@ -350,23 +350,24 @@ def test_unknown_resume_value():
 
     run_to_interrupt(graph, "AMD", config)
 
-    # Resume with an unexpected value — should route to discard (default)
-    with patch("app.nodes.critique.get_llm", side_effect=mock_llm_factory):
-        result = graph.invoke(Command(resume="maybe_later"), config)
+    # An unrecognised value must NOT silently discard the thesis (a typo like
+    # "aprove" would otherwise count as a rejection). The gate re-prompts.
+    result = graph.invoke(Command(resume="maybe_later"), config)
+    pending = [i for t in graph.get_state(config).tasks for i in t.interrupts]
+    assert pending, "Gate should still be waiting after an invalid decision"
+    assert "Invalid decision" in pending[0].value["error"]
+    assert result.get("final_thesis") is None
+    assert not [e for e in result.get("run_log", []) if e.get("node") == "discard"]
+    print("  Resume value 'maybe_later' -> gate re-prompted, nothing discarded")
 
-    # The route_human_decision function treats anything != "approve" as reject
-    assert result["human_decision"] == "maybe_later"
-    assert result["final_thesis"] is None  # Should discard
+    # Decisions are case/whitespace-insensitive and the run then completes.
+    result = graph.invoke(Command(resume="  Reject "), config)
+    assert result["human_decision"] == "reject"
+    assert result["final_thesis"] is None
+    assert [e for e in result["run_log"] if e.get("node") == "discard"]
 
-    run_log = result.get("run_log", [])
-    discard_entries = [e for e in run_log if e.get("node") == "discard"]
-    assert len(discard_entries) >= 1
-
-    print(f"  Resume value: 'maybe_later'")
-    print(f"  Human decision: {result['human_decision']}")
-    print(f"  Routed to: discard (any non-'approve' value = reject)")
-    print(f"  Final thesis: {result['final_thesis']} (None = correct)")
-    print("  [OK] Unknown resume values handled gracefully (routed to discard)")
+    print(f"  Then '  Reject ' -> human decision: {result['human_decision']} (discarded)")
+    print("  [OK] Invalid resume values re-prompt; valid ones are normalized")
     return True
 
 
@@ -395,5 +396,5 @@ if __name__ == "__main__":
       [OK] State inspection — draft thesis readable from snapshot while paused
       [OK] Reject path — routes to discard, no final thesis, graph finishes
       [OK] Approve path — produces complete FinalThesis with disclaimer
-      [OK] Unknown resume — gracefully routes to discard
+      [OK] Unknown resume — gate re-prompts instead of silently discarding
     """)

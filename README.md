@@ -60,15 +60,16 @@ graph TD
 ## Setup
 
 ### Prerequisites
-- Python 3.11+
-- API keys: at least one of Anthropic, OpenAI, or Google Gemini (for LLM nodes)
+- Python 3.11+ (developed on 3.14; the Docker image uses 3.12)
+- LLM provider: an API key for Anthropic, OpenAI, or Google Gemini, or a local Ollama model
 - Massive.com API key (optional — falls back to RSS)
 
 ### Local Setup
 
 ```bash
 # Clone and install
-cd market-research-agent
+cd Agentic-Market-Research-Assistant
+python -m venv .venv && source .venv/bin/activate     # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 
 # Configure
@@ -82,8 +83,14 @@ cp .env.example .env
 #   LANGSMITH_API_KEY=lsv2_...     (optional)
 
 # For Gemini, set GOOGLE_API_KEY and optionally GEMINI_MODEL (default: gemini-3.8-flash).
+# For local inference, install Ollama, run `ollama pull qwen3:4b`, then set
+# LLM_PROVIDER=ollama and OLLAMA_MODEL=qwen3:4b. On CPU, the default local
+# sentiment cap is one article; increase OLLAMA_MAX_SENTIMENT_ARTICLES if your
+# hardware can handle more. OLLAMA_NUM_PREDICT controls output length
+# (default: 768). OLLAMA_BASE_URL defaults to http://localhost:11434.
+# Market/news data still require their configured sources.
 
-# Run tests
+# Run tests (offline: no network, no API keys, no LLM needed)
 pytest tests/ -v
 
 # Start the API server
@@ -93,12 +100,28 @@ uvicorn app.api:app --reload --port 8000
 streamlit run frontend/streamlit_app.py --server.port 8501
 ```
 
+### Verification scripts (one per build phase)
+
+| Script | What it proves | Needs |
+|--------|----------------|-------|
+| `python verify_phase1.py` | Graph compiles, critique loop fires, interrupt pauses, approve/reject routing | nothing (mocked) |
+| `python verify_phase2.py` | Real yfinance + news (Massive.com or RSS fallback), full graph on live data | internet + a working LLM |
+| `python verify_phase3.py` | Real LLM sentiment/synthesis/critique, full run, resume, trace | internet + a working LLM |
+| `python verify_phase4.py` | Critique node, retry loop, max-retry exhaustion | nothing (mocked) |
+| `python verify_phase5.py` | Human gate: state preservation, concurrent threads, approve/reject, invalid input | nothing (mocked) |
+
+Phases 2 and 3 use whatever `LLM_PROVIDER` is configured. With a small local
+Ollama model on CPU they take several minutes.
+
 ### Docker
 
 ```bash
 docker build -t market-research-agent .
 docker run -p 8000:8000 -p 8501:8501 --env-file .env market-research-agent
 ```
+
+Using Ollama from inside the container? Set `OLLAMA_BASE_URL=http://host.docker.internal:11434`
+in your `.env` (the container cannot reach the host's `localhost`).
 
 The API is at `http://localhost:8000` and the Streamlit UI at `http://localhost:8501`.
 
@@ -109,10 +132,16 @@ The API is at `http://localhost:8000` and the Streamlit UI at `http://localhost:
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `POST` | `/run` | Start a research run. Body: `{"ticker": "AAPL"}` |
-| `GET` | `/status/{run_id}` | Check progress — returns current node, draft thesis, run log |
+| `GET` | `/status/{run_id}` | Check progress — status, current node, draft thesis, critique, run log, `degraded` + `degradation_reasons` |
 | `POST` | `/approve/{run_id}` | Submit human decision. Body: `{"decision": "approve"}` or `{"decision": "reject"}` |
 | `GET` | `/thesis/{run_id}` | Fetch the final thesis (after approval) |
 | `GET` | `/health` | Health check |
+
+`/run` returns immediately (the graph runs in a background thread). Poll `/status/{run_id}` until
+`status` is `awaiting_approval`, then `POST /approve/{run_id}`. Statuses: `starting`, `running`,
+`awaiting_approval`, `completed`, `rejected`, `failed`. A decision is case-insensitive; anything
+other than approve/reject is refused (HTTP 422). A placeholder draft (synthesis failed) cannot be
+approved (HTTP 409).
 
 ---
 
@@ -148,23 +177,24 @@ See `run_traces/` for saved JSON traces.
 
 ## Checkpointer Swap Guide
 
-The system defaults to `MemorySaver` (in-process, dev only). For production persistence:
+The system defaults to `MemorySaver` (in-process, dev only: a run paused at the human gate is lost
+on restart). For persistence:
 
 ```bash
-# SQLite
-pip install langgraph-checkpoint-sqlite
+# SQLite (langgraph-checkpoint-sqlite is already in requirements.txt)
 # In .env:
 CHECKPOINTER_BACKEND=sqlite
 SQLITE_DB_PATH=./checkpoints.db
 
 # PostgreSQL
-pip install langgraph-checkpoint-postgres
+pip install langgraph-checkpoint-postgres "psycopg[binary]"
 # In .env:
 CHECKPOINTER_BACKEND=postgres
 POSTGRES_CONN_STRING=postgresql://user:pass@host:5432/dbname
 ```
 
-That's it — `config.py` picks up the new backend automatically.
+`config.py` picks up the new backend automatically; if the package for a persistent backend is
+missing it logs a warning and falls back to memory.
 
 ---
 
@@ -177,7 +207,8 @@ That's it — `config.py` picks up the new backend automatically.
 | LLM quota limits | Articles are classified in one batch request; if a model quota is exhausted, sentiment is marked unavailable and the run is flagged as degraded for reviewer attention |
 | No backtesting | The system produces point-in-time theses, not backtested strategies |
 | Single ticker | One ticker per run — no batch/portfolio analysis |
-| In-memory runs | API run tracking uses an in-memory dict (lost on restart) |
+| In-memory runs | The API's run registry (run_id -> status) is an in-memory dict, lost on restart even with a persistent checkpointer |
+| Small local models | A 3-8B Ollama model produces weak theses (e.g. inconsistent SMA reasoning). The critique node and the human gate are there to catch this; use a stronger model for real work |
 | No streaming | Frontend polls for status rather than receiving streaming updates |
 
 ### What I'd add for production
@@ -210,12 +241,16 @@ market-research-agent/
 │   ├── graph.py             # StateGraph definition + conditional edges
 │   ├── guardrails.py        # Pattern-based action-request refusal
 │   ├── api.py               # FastAPI: /run, /status, /approve, /thesis
-│   └── config.py            # Env loading, LLM/checkpointer factories
+│   └── config.py            # Env loading, LLM (4 providers) + checkpointer factories
 ├── frontend/
 │   └── streamlit_app.py     # Ticker input, progress display, approve/reject UI
 ├── tests/
-│   └── test_agent.py        # 10 pytest tests (nodes, loop, interrupt, guardrails)
+│   ├── conftest.py          # Pins settings so tests ignore your local .env
+│   ├── test_agent.py        # Original suite: schema, market data, sentiment, critique loop, interrupt, guardrails, finalize
+│   ├── test_fixes.py        # Retry loop, human-gate input validation, auto-approval flags, UTF-8 traces
+│   └── test_pipeline.py     # Real nodes with mocked yfinance/news/LLM; full API flow
 ├── run_traces/              # Saved execution traces (gitignored except example)
+├── verify_phase1.py ... verify_phase5.py   # per-phase verification scripts
 ├── .env.example
 ├── requirements.txt
 ├── Dockerfile
@@ -230,14 +265,18 @@ market-research-agent/
 pytest tests/ -v
 ```
 
-10 tests covering:
-1. Graph compilation
-2. Pydantic schema validation
-3. Market data node (success)
-4. Market data graceful degradation (failure)
-5. Critique retry loop (reject → revise → approve)
-6. Interrupt/resume (approve path)
-7. Interrupt/resume (reject path)
-8. Guardrail blocks trade requests
-9. Guardrail allows research requests
-10. Finalize output structure completeness
+All tests run offline: yfinance, both news providers and the LLM are mocked (see
+`tests/conftest.py`, which also pins settings so a local `.env` can't affect results). They cover:
+
+- **Graph:** compilation and node set; retry loop (reject → revise → approve); max-retry exhaustion
+  proceeds with a flag; reject path; LLM failure everywhere still reaches the human gate, flagged
+- **Human gate:** state preserved across the interrupt; decisions are case-insensitive; an invalid
+  decision re-prompts instead of silently discarding
+- **Nodes:** market data success and graceful failure; RSS fallback; sentiment/synthesis/critique with
+  mocked structured output; prompt-injection in news is dropped before it reaches the LLM
+- **Guardrails:** trade/injection requests blocked (including zero-width and fullwidth evasion),
+  research questions allowed, ticker validation
+- **Output:** `FinalThesis` always carries the disclaimer; full critique history; accurate data-source
+  reporting; UTF-8 trace files
+- **API:** full run → approve → thesis flow, reject flow, guardrail 400s, 404/409/422 handling,
+  placeholder drafts cannot be approved

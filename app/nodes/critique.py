@@ -68,11 +68,14 @@ class CritiqueOutput(BaseModel):
         )
     )
     confidence_adjustment: float = Field(
+        default=0.0,
+        ge=-50.0,
+        le=20.0,
         description=(
             "Suggested adjustment to the confidence score in points. "
             "Negative = lower confidence, Positive = raise confidence, "
             "0 = no change needed. Range: -50 to +20."
-        )
+        ),
     )
 
 
@@ -206,6 +209,11 @@ def _build_critique_prompt(
     return "\n".join(parts)
 
 
+def _history_entry(result: CritiqueResult, pass_number: int) -> dict:
+    """One critique_history record (the list is append-only via a reducer)."""
+    return {"pass": pass_number, **result.model_dump()}
+
+
 # ---------------------------------------------------------------------------
 # Node function
 # ---------------------------------------------------------------------------
@@ -223,7 +231,7 @@ def critique(state: ResearchState) -> dict:
     start = time.time()
     ticker = state["ticker"]
     critique_count = state.get("critique_count", 0)
-    draft = state.get("draft_thesis", {})
+    draft = state.get("draft_thesis") or {}
     technical_signals = state.get("technical_signals")
     sentiment_summary = state.get("sentiment_summary")
     settings = get_settings()
@@ -234,6 +242,7 @@ def critique(state: ResearchState) -> dict:
         elapsed_ms = (time.time() - start) * 1000
         result = CritiqueResult(
             approved=True,  # Let it through to human — they'll see it's a fallback
+            auto_approved=True,
             issues=["Draft is a fallback/placeholder thesis due to prior LLM failure"],
             unsupported_claims=[],
             suggested_revisions=[],
@@ -242,6 +251,7 @@ def critique(state: ResearchState) -> dict:
         return {
             "critique_notes": result.model_dump(),
             "critique_count": critique_count + 1,
+            "critique_history": [_history_entry(result, critique_count + 1)],
             "run_log": [
                 LogEntry(
                     node="critique",
@@ -295,6 +305,7 @@ def critique(state: ResearchState) -> dict:
         return {
             "critique_notes": result.model_dump(),
             "critique_count": critique_count + 1,
+            "critique_history": [_history_entry(result, critique_count + 1)],
             "run_log": [
                 LogEntry(
                     node="critique",
@@ -322,6 +333,7 @@ def critique(state: ResearchState) -> dict:
         # Auto-approve with warning — human reviewer is the final gate
         result = CritiqueResult(
             approved=True,
+            auto_approved=True,
             issues=[f"Critique could not be performed due to LLM error: {e}"],
             unsupported_claims=[],
             suggested_revisions=[],
@@ -331,6 +343,7 @@ def critique(state: ResearchState) -> dict:
         return {
             "critique_notes": result.model_dump(),
             "critique_count": critique_count + 1,
+            "critique_history": [_history_entry(result, critique_count + 1)],
             "run_log": [
                 LogEntry(
                     node="critique",

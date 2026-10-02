@@ -279,6 +279,16 @@ def synthesize_draft(state: ResearchState) -> dict:
             revision_number=critique_count,
         )
 
+        # Guardrail on the *generated* text too: refuse theses containing
+        # trade-execution / prompt-injection language (falls back to placeholder).
+        generated = " ".join([
+            draft.summary, *draft.technical_evidence, *draft.sentiment_evidence,
+            *draft.risks_and_caveats, *draft.contradictions,
+        ])
+        out_safe, out_refusal = check_guardrails(generated)
+        if not out_safe:
+            raise ValueError(f"guardrail tripped on generated thesis: {out_refusal.splitlines()[-1]}")
+
         elapsed_ms = (time.time() - start) * 1000
         logger.info(
             "Draft thesis for %s: %s (confidence: %.0f) in %.0fms",

@@ -1,14 +1,15 @@
 """
-Phase 1 Verification Script
+Phase 1 Verification Script — graph skeleton and control flow
 
-Validates that the graph skeleton:
-  1. Compiles without errors
-  2. Runs end-to-end with stub data
-  3. The critique loop fires (stub rejects first draft, approves revision)
-  4. The human_approval_gate interrupt genuinely pauses execution
-  5. Resuming with "approve" routes to finalize and produces a FinalThesis
-  6. Resuming with "reject" routes to discard
-  7. The run_log captures all node executions in order
+Validates, fully offline (yfinance, news and the LLM are mocked), that:
+  1. The graph compiles
+  2. The graph topology can be rendered
+  3. A run goes through every node and pauses at the human gate
+  4. The critique loop fires (first draft rejected, revision approved)
+  5. The pause is a genuine interrupt() (finalize/discard have not run)
+  6. Resuming with "approve" -> finalize, FinalThesis with baked-in disclaimer
+  7. Resuming with "reject" -> discard
+  8. The run_log captures node executions in order
 
 Run: python verify_phase1.py
 """
@@ -17,157 +18,165 @@ from __future__ import annotations
 
 import sys
 import uuid
+from unittest.mock import MagicMock, patch
+
+sys.path.insert(0, ".")
+
+import os
+os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import Command
 
-# Ensure project root is on path
-sys.path.insert(0, ".")
-
 from app.graph import build_graph, save_run_trace
-from app.state import ResearchState
+from app.nodes.critique import CritiqueOutput
+from app.nodes.sentiment import ArticleSentimentOutput, SentimentBatchOutput
+from app.nodes.synthesis import ThesisOutput
+from app.state import NewsArticle
+
+
+def make_llm_factory():
+    """Mock LLM: critique rejects the first draft, approves the revision."""
+    calls = {"critique": 0}
+
+    def critique_invoke(_messages):
+        calls["critique"] += 1
+        if calls["critique"] == 1:
+            return CritiqueOutput(
+                approved=False, issues=["Confidence too high"], unsupported_claims=[],
+                suggested_revisions=["Lower confidence"], confidence_adjustment=-10.0,
+            )
+        return CritiqueOutput(
+            approved=True, issues=[], unsupported_claims=[],
+            suggested_revisions=[], confidence_adjustment=0.0,
+        )
+
+    def factory():
+        llm = MagicMock()
+
+        def structured(schema):
+            m = MagicMock()
+            if schema is CritiqueOutput:
+                m.invoke.side_effect = critique_invoke
+            elif schema is ThesisOutput:
+                m.invoke.return_value = ThesisOutput(
+                    direction="bullish", confidence_score=65.0, summary="Bullish lean.",
+                    technical_evidence=["RSI 55"], sentiment_evidence=["2/3 positive"],
+                    risks_and_caveats=["rates", "valuation"], contradictions=["volume"],
+                )
+            else:
+                m.invoke.return_value = SentimentBatchOutput(article_sentiments=[
+                    ArticleSentimentOutput(article_index=0, sentiment="positive",
+                                           confidence=0.8, rationale="ok")])
+            return m
+
+        llm.with_structured_output.side_effect = structured
+        return llm
+
+    return factory
+
+
+def make_df():
+    import numpy as np
+    import pandas as pd
+    dates = pd.date_range("2024-01-01", periods=63, freq="B")
+    return pd.DataFrame({
+        "Open": np.linspace(100, 110, 63), "High": np.linspace(101, 111, 63),
+        "Low": np.linspace(99, 109, 63), "Close": np.linspace(100, 110, 63),
+        "Volume": np.full(63, 1_000_000),
+    }, index=dates)
+
+
+INITIAL_STATE = {
+    "ticker": "AAPL", "price_data": None, "technical_signals": None,
+    "news_articles": None, "sentiment_summary": None, "draft_thesis": None,
+    "critique_notes": None, "critique_count": 0, "human_decision": None,
+    "final_thesis": None, "run_log": [], "error_log": [],
+}
 
 
 def run_verification():
     print("=" * 70)
-    print("PHASE 1 VERIFICATION — Graph Skeleton")
+    print("PHASE 1 VERIFICATION — Graph skeleton and control flow")
     print("=" * 70)
 
-    # --- Step 1: Compile the graph ---
-    print("\n[1/7] Compiling graph...")
-    checkpointer = MemorySaver()
-    builder = build_graph()
-    graph = builder.compile(checkpointer=checkpointer)
-    print("  ✓ Graph compiled successfully")
+    print("\n[1/8] Compiling graph...")
+    graph = build_graph().compile(checkpointer=MemorySaver())
+    print("  [OK] Graph compiled successfully")
 
-    # --- Step 2: Visualize the graph ---
-    print("\n[2/7] Graph structure:")
+    print("\n[2/8] Graph structure:")
     try:
-        mermaid = graph.get_graph().draw_mermaid()
-        print(mermaid)
-    except Exception as e:
+        print(graph.get_graph().draw_mermaid())
+    except Exception as e:  # rendering is cosmetic
         print(f"  (Could not render mermaid: {e})")
 
-    # --- Step 3: Start a run (should pause at human gate) ---
-    print("\n[3/7] Starting run for ticker AAPL...")
-    thread_id = str(uuid.uuid4())
-    config = {"configurable": {"thread_id": thread_id}}
+    factory = make_llm_factory()
+    patches = [
+        patch("app.nodes.critique.get_llm", side_effect=factory),
+        patch("app.nodes.synthesis.get_llm", side_effect=factory),
+        patch("app.nodes.sentiment.get_llm", side_effect=factory),
+        patch("app.nodes.news._fetch_massive_news",
+              return_value=[NewsArticle(title="Mock article", url="https://example.com/1",
+                                        provider="massive.com")]),
+        patch("app.nodes.market_data._fetch_yfinance_data", return_value=make_df()),
+    ]
+    for p in patches:
+        p.start()
+    try:
+        print("\n[3/8] Starting run for AAPL (should pause at the human gate)...")
+        thread_id = str(uuid.uuid4())
+        config = {"configurable": {"thread_id": thread_id}}
+        result = graph.invoke(dict(INITIAL_STATE), config)
+        run_log = result.get("run_log", [])
+        nodes_run = [e["node"] for e in run_log]
+        for expected in ("fetch_market_data", "fetch_news", "analyze_sentiment",
+                         "synthesize_draft", "critique"):
+            assert expected in nodes_run, f"{expected} did not run"
+        print(f"  [OK] Nodes executed: {nodes_run}")
 
-    initial_state = {
-        "ticker": "AAPL",
-        "price_data": None,
-        "technical_signals": None,
-        "news_articles": None,
-        "sentiment_summary": None,
-        "draft_thesis": None,
-        "critique_notes": None,
-        "critique_count": 0,
-        "human_decision": None,
-        "final_thesis": None,
-        "run_log": [],
-        "error_log": [],
-    }
+        print("\n[4/8] Verifying critique loop...")
+        critiques = [e for e in run_log if e["node"] == "critique"]
+        syntheses = [e for e in run_log if e["node"] == "synthesize_draft"]
+        assert len(critiques) >= 2 and len(syntheses) >= 2, "critique loop did not fire"
+        assert "NEEDS REVISION" in critiques[0]["message"]
+        assert "APPROVED" in critiques[1]["message"]
+        print(f"  [OK] {len(critiques)} critique passes, {len(syntheses)} synthesis passes")
 
-    # This should run through all nodes and pause at human_approval_gate
-    result = graph.invoke(initial_state, config)
-    print("  ✓ Graph invoked — execution paused (as expected)")
+        print("\n[5/8] Verifying interrupt...")
+        assert not [e for e in run_log if e["node"] in ("finalize", "discard")]
+        snapshot = graph.get_state(config)
+        assert snapshot.next == ("human_approval_gate",), snapshot.next
+        print(f"  [OK] Genuinely paused — next: {snapshot.next}")
 
-    # --- Step 4: Verify the critique loop fired ---
-    print("\n[4/7] Verifying critique loop...")
-    run_log = result.get("run_log", [])
-    critique_entries = [e for e in run_log if e.get("node") == "critique"]
-    synthesis_entries = [e for e in run_log if e.get("node") == "synthesize_draft"]
+        print("\n[6/8] Resuming with APPROVE...")
+        result = graph.invoke(Command(resume="approve"), config)
+        final = result.get("final_thesis")
+        assert final is not None and final["human_approved"] is True
+        assert "NOT FINANCIAL ADVICE" in final["disclaimer"]
+        print(f"  [OK] Finalized: {final['direction']} @ {final['confidence_score']}")
+        print(f"       Disclaimer: {final['disclaimer'][:60]}...")
 
-    print(f"  Critique passes: {len(critique_entries)}")
-    print(f"  Synthesis passes: {len(synthesis_entries)}")
+        print("\n[7/8] Testing rejection path...")
+        cfg_r = {"configurable": {"thread_id": str(uuid.uuid4())}}
+        graph.invoke(dict(INITIAL_STATE), cfg_r)
+        result_r = graph.invoke(Command(resume="reject"), cfg_r)
+        assert result_r["human_decision"] == "reject"
+        assert result_r["final_thesis"] is None
+        assert [e for e in result_r["run_log"] if e["node"] == "discard"]
+        print("  [OK] Rejection path works — thesis discarded")
 
-    assert len(critique_entries) >= 2, (
-        f"Expected at least 2 critique passes (initial + after revision), "
-        f"got {len(critique_entries)}"
-    )
-    assert len(synthesis_entries) >= 2, (
-        f"Expected at least 2 synthesis passes (initial + revision), "
-        f"got {len(synthesis_entries)}"
-    )
-    print("  ✓ Critique loop fired correctly — draft was revised at least once")
+        print("\n[8/8] Run log (approval path):")
+        for i, entry in enumerate(result["run_log"], 1):
+            print(f"  {i:>2}. [{entry['status']:>20}] {entry['node']:>22} — "
+                  f"{entry.get('message', '')[:70]}")
+        print(f"\n  Trace saved to: {save_run_trace(result, thread_id)}")
+    finally:
+        for p in patches:
+            p.stop()
 
-    # --- Step 5: Verify interrupt happened ---
-    print("\n[5/7] Verifying interrupt state...")
-
-    # interrupt() halts the node BEFORE it can return state updates,
-    # so there won't be a "waiting_for_human" log entry in the state.
-    # Instead, we verify the interrupt by checking:
-    #   1. The graph returned without reaching finalize or discard
-    #   2. The graph's checkpoint state shows the interrupted node
-    finalize_entries = [e for e in run_log if e.get("node") == "finalize"]
-    discard_entries_check = [e for e in run_log if e.get("node") == "discard"]
-    assert len(finalize_entries) == 0, "Finalize should NOT have run before human approval"
-    assert len(discard_entries_check) == 0, "Discard should NOT have run before human decision"
-
-    # Verify the checkpointer knows we're interrupted
-    snapshot = graph.get_state(config)
-    assert snapshot.next, "Graph should have a 'next' node (paused at interrupt)"
-    print(f"  Graph paused — next node(s): {snapshot.next}")
-    print("  ✓ Graph is genuinely paused at human_approval_gate via interrupt()")
-
-    # --- Step 6: Resume with "approve" ---
-    print("\n[6/7] Resuming with human decision: APPROVE...")
-    result = graph.invoke(Command(resume="approve"), config)
-
-    run_log = result.get("run_log", [])
-    finalize_entries = [e for e in run_log if e.get("node") == "finalize"]
-    assert len(finalize_entries) >= 1, "Finalize should have run after approval"
-
-    final_thesis = result.get("final_thesis")
-    assert final_thesis is not None, "Final thesis should be present after approval"
-    assert "NOT FINANCIAL ADVICE" in final_thesis.get("disclaimer", ""), \
-        "Disclaimer must be baked into the final thesis"
-    assert final_thesis["human_approved"] is True
-    print("  ✓ Thesis finalized with baked-in disclaimer")
-    print(f"    Direction: {final_thesis['direction']}")
-    print(f"    Confidence: {final_thesis['confidence_score']}")
-    print(f"    Disclaimer: {final_thesis['disclaimer'][:60]}...")
-
-    # --- Step 7: Test rejection path ---
-    print("\n[7/7] Testing rejection path...")
-    thread_id_reject = str(uuid.uuid4())
-    config_reject = {"configurable": {"thread_id": thread_id_reject}}
-
-    result_r = graph.invoke(initial_state, config_reject)
-    result_r = graph.invoke(Command(resume="reject"), config_reject)
-
-    run_log_r = result_r.get("run_log", [])
-    discard_entries = [e for e in run_log_r if e.get("node") == "discard"]
-    assert len(discard_entries) >= 1, "Discard should have run after rejection"
-    assert result_r.get("human_decision") == "reject"
-    print("  ✓ Rejection path works — thesis discarded")
-
-    # --- Save trace ---
     print("\n" + "=" * 70)
-    print("SAVING RUN TRACE")
-    trace_path = save_run_trace(result, thread_id)
-    print(f"  Trace saved to: {trace_path}")
-
-    # --- Summary ---
-    print("\n" + "=" * 70)
-    print("FULL RUN LOG (approval path):")
+    print("ALL PHASE 1 CHECKS PASSED")
     print("=" * 70)
-    for i, entry in enumerate(run_log, 1):
-        print(f"  {i}. [{entry.get('status', '?'):>20}] {entry.get('node', '?'):>25} — {entry.get('message', '')}")
-
-    print("\n" + "=" * 70)
-    print("✅ ALL PHASE 1 CHECKS PASSED")
-    print("=" * 70)
-    print("""
-    Verified:
-      ✓ Graph compiles with MemorySaver checkpointer
-      ✓ All stub nodes execute and produce typed state updates
-      ✓ Critique loop fires (rejected → revised → approved)
-      ✓ Human approval gate genuinely pauses execution via interrupt()
-      ✓ Resume with 'approve' → finalize (produces FinalThesis with disclaimer)
-      ✓ Resume with 'reject' → discard (no final thesis)
-      ✓ Run log captures all node executions in order
-    """)
 
 
 if __name__ == "__main__":
